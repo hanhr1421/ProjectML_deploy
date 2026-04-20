@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<title>Sales Forecast</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<style>
+  body { font-family: Arial, sans-serif; max-width: 900px; margin: 30px auto; padding: 0 20px; }
+  h1 { margin-bottom: 5px; }
+  p.desc { color: #666; margin-bottom: 20px; }
+
+  .upload-box {
+    border: 2px dashed #aaa;
+    padding: 40px;
+    text-align: center;
+    cursor: pointer;
+    margin-bottom: 20px;
+    background: #fafafa;
+  }
+  .upload-box.dragover { border-color: #333; background: #eee; }
+  .upload-box input { display: none; }
+
+  .file-name { color: green; margin-bottom: 10px; }
+
+  button {
+    padding: 10px 20px;
+    font-size: 14px;
+    cursor: pointer;
+    margin-right: 8px;
+    margin-bottom: 10px;
+  }
+  #btn-run { background: #4CAF50; color: white; border: none; }
+  #btn-run:disabled { background: #ccc; cursor: not-allowed; }
+
+  .msg-error { color: red; margin-bottom: 10px; }
+  .msg-loading { color: #666; margin-bottom: 10px; }
+
+  #results { display: none; margin-top: 20px; }
+  .summary-line { margin-bottom: 8px; }
+  .summary-line b { color: #333; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
+  th { background: #333; color: white; padding: 8px; text-align: left; cursor: pointer; }
+  td { padding: 8px; border-bottom: 1px solid #ddd; }
+  tr:hover { background: #f5f5f5; }
+  tr.selected { background: #d0e8ff !important; }
+  .num { text-align: right; }
+
+  .chart-box { display: none; margin-top: 20px; padding: 15px; border: 1px solid #ddd; }
+  .chart-box canvas { max-height: 300px; }
+  .hint { font-size: 12px; color: #999; margin-top: 5px; }
+</style>
+</head>
+<body>
+
+<h1>Sales Forecast</h1>
+<p class="desc">Upload file CSV (sellout_w.csv) de du bao doanh so thang tiep theo.</p>
+
+<div class="upload-box" id="dropzone">
+  <b>Keo tha file CSV vao day</b><br>
+  <span style="color:#888">hoac click de chon file</span>
+  <input type="file" id="file-input" accept=".csv">
+</div>
+<div class="file-name" id="file-name" style="display:none"></div>
+
+<button id="btn-run" onclick="runForecast()" disabled>Chay du bao</button>
+<button onclick="resetAll()">Reset</button>
+
+<div class="msg-error" id="msg-error" style="display:none"></div>
+<div class="msg-loading" id="msg-loading" style="display:none">Dang xu ly... vui long cho.</div>
+
+<div id="results">
+  <h2>Ket qua du bao</h2>
+  <div class="summary-line">Thang: <b id="s-month">-</b></div>
+  <div class="summary-line">San pham: <b id="s-products">0</b> | Tong unit: <b id="s-units">0</b></div>
+
+  <button onclick="downloadCSV()">Tai CSV</button>
+
+  <p class="hint">Click vao dong de xem bieu do.</p>
+  <table>
+    <thead>
+      <tr>
+        <th onclick="sortBy(0)">#</th>
+        <th onclick="sortBy(1)">San pham</th>
+        <th onclick="sortBy(2)">Thang</th>
+        <th onclick="sortBy(3)">Tong Unit</th>
+        <th onclick="sortBy(4)">TB/Ngay</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+
+  <div class="chart-box" id="chart-box">
+    <h3 id="chart-title">-</h3>
+    <canvas id="chart"></canvas>
+    <button onclick="closeChart()">Dong bieu do</button>
+  </div>
+</div>
+
+<script>
+var API = window.location.origin;
+var uploadedFile = null;
+var forecastData = [];
+var monthlyHistory = {};
+var forecastMonth = '';
+var chart = null;
+var sortCol = 3, sortAsc = false;
+
+// Upload
+var dropzone = document.getElementById('dropzone');
+var fileInput = document.getElementById('file-input');
+
+dropzone.addEventListener('click', function() { fileInput.click(); });
+dropzone.addEventListener('dragover', function(e) { e.preventDefault(); dropzone.classList.add('dragover'); });
+dropzone.addEventListener('dragleave', function() { dropzone.classList.remove('dragover'); });
+dropzone.addEventListener('drop', function(e) {
+  e.preventDefault();
+  dropzone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) pickFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', function(e) { if (e.target.files.length) pickFile(e.target.files[0]); });
+
+function pickFile(file) {
+  if (!file.name.endsWith('.csv')) { showError('Vui long chon file CSV.'); return; }
+  uploadedFile = file;
+  document.getElementById('file-name').style.display = 'block';
+  document.getElementById('file-name').textContent = 'File: ' + file.name;
+  document.getElementById('btn-run').disabled = false;
+  hideError();
+}
+
+// Chay du bao
+function runForecast() {
+  if (!uploadedFile) return;
+  hideError();
+  document.getElementById('btn-run').disabled = true;
+  document.getElementById('msg-loading').style.display = 'block';
+  document.getElementById('results').style.display = 'none';
+
+  var form = new FormData();
+  form.append('file', uploadedFile);
+
+  fetch(API + '/predict/file', { method: 'POST', body: form })
+    .then(function(resp) {
+      if (!resp.ok) {
+        // Thu doc JSON error, neu khong duoc thi doc text
+        return resp.text().then(function(txt) {
+          var errMsg = 'Loi server';
+          try {
+            var errObj = JSON.parse(txt);
+            errMsg = errObj.detail || errMsg;
+          } catch(e) {
+            errMsg = txt || errMsg;
+          }
+          throw new Error(errMsg);
+        });
+      }
+      return resp.json();
+    })
+    .then(function(data) {
+      if (data.status === 'error') throw new Error(data.message);
+
+      forecastData = data.results || [];
+      monthlyHistory = data.monthly_history || {};
+      forecastMonth = data.forecast_month || '?';
+      forecastData.sort(function(a, b) { return b.predicted_total_unit - a.predicted_total_unit; });
+
+      document.getElementById('s-month').textContent = forecastMonth;
+      document.getElementById('s-products').textContent = forecastData.length;
+      var total = 0;
+      for (var i = 0; i < forecastData.length; i++) total += forecastData[i].predicted_total_unit;
+      document.getElementById('s-units').textContent = Math.round(total).toLocaleString();
+
+      renderTable();
+      document.getElementById('results').style.display = 'block';
+    })
+    .catch(function(e) {
+      showError(e.message);
+    })
+    .finally(function() {
+      document.getElementById('msg-loading').style.display = 'none';
+      document.getElementById('btn-run').disabled = false;
+    });
+}
+
+// Bang ket qua
+function renderTable() {
+  var tbody = document.getElementById('tbody');
+  var html = '';
+  for (var i = 0; i < forecastData.length; i++) {
+    var r = forecastData[i];
+    var prodSafe = r.product.replace(/'/g, "\\'");
+    html += '<tr onclick="showChart(\'' + prodSafe + '\', this)">';
+    html += '<td class="num">' + (i+1) + '</td>';
+    html += '<td>' + r.product + '</td>';
+    html += '<td>' + r.forecast_month + '</td>';
+    html += '<td class="num">' + Math.round(r.predicted_total_unit).toLocaleString() + '</td>';
+    html += '<td class="num">' + r.predicted_avg_daily.toFixed(1) + '</td>';
+    html += '</tr>';
+  }
+  tbody.innerHTML = html;
+}
+
+function sortBy(col) {
+  if (sortCol === col) sortAsc = !sortAsc;
+  else { sortCol = col; sortAsc = col <= 2; }
+  forecastData.sort(function(a, b) {
+    var va, vb;
+    if (col === 1) { va = a.product; vb = b.product; }
+    else if (col === 2) { va = a.forecast_month; vb = b.forecast_month; }
+    else if (col === 3) { va = a.predicted_total_unit; vb = b.predicted_total_unit; }
+    else if (col === 4) { va = a.predicted_avg_daily; vb = b.predicted_avg_daily; }
+    else return 0;
+    if (typeof va === 'string') return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return sortAsc ? va - vb : vb - va;
+  });
+  renderTable();
+}
+
+// Bieu do
+function showChart(product, row) {
+  var rows = document.querySelectorAll('#tbody tr');
+  for (var i = 0; i < rows.length; i++) rows[i].classList.remove('selected');
+  if (row) row.classList.add('selected');
+
+  var hist = monthlyHistory[product] || { months: [], units: [] };
+  var fc = null;
+  for (var i = 0; i < forecastData.length; i++) {
+    if (forecastData[i].product === product) { fc = forecastData[i]; break; }
+  }
+  var fcVal = fc ? Math.round(fc.predicted_total_unit) : 0;
+
+  var labels = hist.months.concat([forecastMonth]);
+  var histLine = hist.units.concat([null]);
+  var fcLine = [];
+  for (var i = 0; i < hist.months.length; i++) fcLine.push(null);
+  if (hist.units.length > 0) fcLine[hist.units.length - 1] = hist.units[hist.units.length - 1];
+  fcLine.push(fcVal);
+
+  if (chart) { chart.destroy(); chart = null; }
+
+  document.getElementById('chart-title').textContent = product;
+  document.getElementById('chart-box').style.display = 'block';
+
+  chart = new Chart(document.getElementById('chart'), {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [
+        {
+          label: 'Lich su',
+          data: histLine,
+          borderColor: 'blue',
+          pointRadius: 2,
+          fill: false,
+          tension: 0.2,
+        },
+        {
+          label: 'Du bao',
+          data: fcLine,
+          borderColor: 'red',
+          borderDash: [5, 5],
+          pointRadius: 3,
+          pointBackgroundColor: 'red',
+          fill: false,
+          tension: 0.2,
+          spanGaps: true,
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { position: 'top' } },
+      scales: {
+        x: { ticks: { maxRotation: 45, font: { size: 10 } } },
+        y: { beginAtZero: true }
+      }
+    }
+  });
+
+  document.getElementById('chart-box').scrollIntoView({ behavior: 'smooth' });
+}
+
+function closeChart() {
+  document.getElementById('chart-box').style.display = 'none';
+  var rows = document.querySelectorAll('#tbody tr');
+  for (var i = 0; i < rows.length; i++) rows[i].classList.remove('selected');
+  if (chart) { chart.destroy(); chart = null; }
+}
+
+// Tai CSV
+function downloadCSV() {
+  var csv = 'product,forecast_month,predicted_total_unit,predicted_avg_daily\n';
+  for (var i = 0; i < forecastData.length; i++) {
+    var r = forecastData[i];
+    csv += '"' + r.product + '",' + r.forecast_month + ',' +
+           Math.round(r.predicted_total_unit) + ',' + r.predicted_avg_daily.toFixed(1) + '\n';
+  }
+  var blob = new Blob(['\ufeff' + csv], { type: 'text/csv' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'forecast_' + forecastMonth + '.csv';
+  a.click();
+}
+
+// Helpers
+function showError(msg) {
+  var el = document.getElementById('msg-error');
+  el.textContent = 'Loi: ' + msg;
+  el.style.display = 'block';
+}
+function hideError() { document.getElementById('msg-error').style.display = 'none'; }
+
+function resetAll() {
+  uploadedFile = null;
+  forecastData = [];
+  monthlyHistory = {};
+  forecastMonth = '';
+  closeChart();
+  document.getElementById('file-name').style.display = 'none';
+  document.getElementById('btn-run').disabled = true;
+  document.getElementById('results').style.display = 'none';
+  document.getElementById('file-input').value = '';
+  hideError();
+}
+</script>
+</body>
+</html>
